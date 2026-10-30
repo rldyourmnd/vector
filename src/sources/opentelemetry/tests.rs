@@ -2559,22 +2559,50 @@ async fn json_empty_exports_use_json_receipts_and_keep_errors_separate() {
     }
 }
 
+fn output_events(container: &str) -> Vec<serde_json::Value> {
+    let output = std::process::Command::new("docker")
+        .args(["logs", container])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value.get("resourceSpans").is_some())
+        .collect()
+}
+
+fn create_image_probe_request() -> ExportTraceServiceRequest {
+    let mut request = create_test_traces_request();
+    let resource = &mut request.resource_spans[0];
+    resource.schema_url = "https://example.invalid/resource-schema".to_owned();
+    resource.resource.as_mut().unwrap().attributes = vec![KeyValue {
+        key: "service.name".to_owned(),
+        value: Some(AnyValue {
+            value: Some(StringValue("public-image-probe".to_owned())),
+        }),
+    }];
+    let scope = &mut resource.scope_spans[0];
+    scope.scope = Some(InstrumentationScope {
+        name: "public-image-probe".to_owned(),
+        version: "1.0.0".to_owned(),
+        ..Default::default()
+    });
+    scope.schema_url = "https://example.invalid/scope-schema".to_owned();
+    scope.spans.truncate(1);
+    let span = &mut scope.spans[0];
+    span.trace_id = b"0123456789abcdef".to_vec();
+    span.span_id = b"01234567".to_vec();
+    span.parent_span_id = b"76543210".to_vec();
+    span.name = "zero-duration-probe".to_owned();
+    span.end_time_unix_nano = span.start_time_unix_nano;
+    request
+}
+
 #[tokio::test]
 #[ignore = "requires the source-bound Docker candidate and explicit synthetic endpoints"]
 async fn qualified_image_empty_exports() {
-    fn output_events(container: &str) -> Vec<serde_json::Value> {
-        let output = std::process::Command::new("docker")
-            .args(["logs", container])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .filter(|value| value.get("resourceSpans").is_some())
-            .collect()
-    }
     let http = std::env::var("VECTOR_TEST_OTLP_HTTP").expect("owned image HTTP endpoint");
     let grpc = std::env::var("VECTOR_TEST_OTLP_GRPC").expect("owned image gRPC endpoint");
     let container = std::env::var("VECTOR_TEST_OTLP_CONTAINER").expect("owned image container");
@@ -2616,29 +2644,7 @@ async fn qualified_image_empty_exports() {
         "zero-record exports emitted an event"
     );
 
-    let mut request = create_test_traces_request();
-    let resource = &mut request.resource_spans[0];
-    resource.schema_url = "https://example.invalid/resource-schema".to_owned();
-    resource.resource.as_mut().unwrap().attributes = vec![KeyValue {
-        key: "service.name".to_owned(),
-        value: Some(AnyValue {
-            value: Some(StringValue("public-image-probe".to_owned())),
-        }),
-    }];
-    let scope = &mut resource.scope_spans[0];
-    scope.scope = Some(InstrumentationScope {
-        name: "public-image-probe".to_owned(),
-        version: "1.0.0".to_owned(),
-        ..Default::default()
-    });
-    scope.schema_url = "https://example.invalid/scope-schema".to_owned();
-    scope.spans.truncate(1);
-    let span = &mut scope.spans[0];
-    span.trace_id = b"0123456789abcdef".to_vec();
-    span.span_id = b"01234567".to_vec();
-    span.parent_span_id = b"76543210".to_vec();
-    span.name = "zero-duration-probe".to_owned();
-    span.end_time_unix_nano = span.start_time_unix_nano;
+    let request = create_image_probe_request();
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{http}/v1/traces"))
@@ -2697,5 +2703,4 @@ async fn qualified_image_empty_exports() {
         assert_eq!(span["spanId"], "01234567");
         assert_eq!(span["parentSpanId"], "76543210");
     }
-    println!("SOURCE_BOUND_IMAGE_HTTP_JSON_GRPC_NOOP_AND_NONEMPTY_IDENTITY_PASS");
 }
