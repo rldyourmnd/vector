@@ -21,7 +21,7 @@ jobs:
       contents: read
       packages: write
     env:
-      EXPECTED_SOURCE_REF: 38a72b9709756f66bf0b3842084a3e252ff6426f
+      EXPECTED_SOURCE_REF: 272f9e260c079c546b6980a1b115a5328bb3cdcc
       UPSTREAM_BASE: 0d0b35865036f8b5c2f0104d9744fa84985ffff1
       VECTOR_BASE: timberio/vector:0.60.0-debian@sha256:73f0cd0e2c52f5d1f7bad12b1f3f2e9dbb375b469eec8c77fb5ae35c58a8a6d2
       CARGO_BUILD_JOBS: 2
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: 38a72b9709756f66bf0b3842084a3e252ff6426f
+          ref: 272f9e260c079c546b6980a1b115a5328bb3cdcc
       - name: Bind only provider-owned native outputs
         shell: bash
         run: |
@@ -132,7 +132,8 @@ jobs:
           docker run -d --name "$lane" --network "$lane" --cpus 1 --memory 512m --pids-limit 128             --read-only --cap-drop ALL --tmpfs /data:rw,size=16777216 --tmpfs /tmp:rw,size=16777216             --mount "type=bind,src=$RUNNER_TEMP/otlp060-image.yaml,dst=/etc/vector/fixture.yaml,readonly"             "$image" --config /etc/vector/fixture.yaml
           address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$lane")
           python3 -B src/sources/opentelemetry/tests/empty_probe.py "http://$address:4318" --expect fixed
-          VECTOR_TEST_OTLP_HTTP="http://$address:4318" VECTOR_TEST_OTLP_GRPC="http://$address:4317" VECTOR_TEST_OTLP_CONTAINER="$lane"             cargo test --locked --offline -p vector --lib --no-default-features --features "$FEATURES"             sources::opentelemetry::tests::qualified_image_empty_exports -- --ignored --exact --nocapture
+          VECTOR_TEST_OTLP_HTTP="http://$address:4318" VECTOR_TEST_OTLP_GRPC="http://$address:4317" VECTOR_TEST_OTLP_CONTAINER="$lane"             cargo test --locked --offline -p vector --lib --no-default-features --features "$FEATURES"             sources::opentelemetry::tests::qualified_image_empty_exports -- --ignored --exact --nocapture | tee "$RUNNER_TEMP/image-native.log"
+          grep -F "test result: ok. 1 passed; 0 failed;" "$RUNNER_TEMP/image-native.log"
           docker logs "$lane"
           docker image inspect "$image" --format '{{json .RepoDigests}} {{.Id}} {{.Os}}/{{.Architecture}}'
       - name: Verify canonical inputs before publishing
