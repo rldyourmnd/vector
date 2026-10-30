@@ -22,3 +22,8 @@ sinks:
       uri: http://127.0.0.1:4319/v1/traces
       encoding:
         codec: otlp
+  console:
+    type: console
+    inputs: [otel.traces]
+    encoding:
+      codec: json

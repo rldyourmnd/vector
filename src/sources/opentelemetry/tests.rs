@@ -2558,3 +2558,144 @@ async fn json_empty_exports_use_json_receipts_and_keep_errors_separate() {
         assert!(!status["message"].as_str().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+#[ignore = "requires the source-bound Docker candidate and explicit synthetic endpoints"]
+async fn qualified_image_empty_exports() {
+    fn output_events(container: &str) -> Vec<serde_json::Value> {
+        let output = std::process::Command::new("docker")
+            .args(["logs", container])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| value.get("resourceSpans").is_some())
+            .collect()
+    }
+    let http = std::env::var("VECTOR_TEST_OTLP_HTTP").expect("owned image HTTP endpoint");
+    let grpc = std::env::var("VECTOR_TEST_OTLP_GRPC").expect("owned image gRPC endpoint");
+    let container = std::env::var("VECTOR_TEST_OTLP_CONTAINER").expect("owned image container");
+    let mut traces = TraceServiceClient::connect(grpc.clone()).await.unwrap();
+    let mut logs = LogsServiceClient::connect(grpc.clone()).await.unwrap();
+    let mut metrics = MetricsServiceClient::connect(grpc).await.unwrap();
+    for bytes in [vec![], vec![10, 0], vec![10, 2, 18, 0], vec![], vec![]] {
+        assert!(
+            traces
+                .export(ExportTraceServiceRequest::decode(bytes.as_slice()).unwrap())
+                .await
+                .unwrap()
+                .into_inner()
+                .partial_success
+                .is_none()
+        );
+        assert!(
+            logs.export(ExportLogsServiceRequest::decode(bytes.as_slice()).unwrap())
+                .await
+                .unwrap()
+                .into_inner()
+                .partial_success
+                .is_none()
+        );
+        assert!(
+            metrics
+                .export(ExportMetricsServiceRequest::decode(bytes.as_slice()).unwrap())
+                .await
+                .unwrap()
+                .into_inner()
+                .partial_success
+                .is_none()
+        );
+    }
+    // HTTP binary/JSON controls ran before this test against this exact container.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        output_events(&container).is_empty(),
+        "zero-record exports emitted an event"
+    );
+
+    let mut request = create_test_traces_request();
+    let resource = &mut request.resource_spans[0];
+    resource.schema_url = "https://example.invalid/resource-schema".to_owned();
+    resource.resource.as_mut().unwrap().attributes = vec![KeyValue {
+        key: "service.name".to_owned(),
+        value: Some(AnyValue {
+            value: Some(StringValue("public-image-probe".to_owned())),
+        }),
+    }];
+    let scope = &mut resource.scope_spans[0];
+    scope.scope = Some(InstrumentationScope {
+        name: "public-image-probe".to_owned(),
+        version: "1.0.0".to_owned(),
+        ..Default::default()
+    });
+    scope.schema_url = "https://example.invalid/scope-schema".to_owned();
+    scope.spans.truncate(1);
+    let span = &mut scope.spans[0];
+    span.trace_id = b"0123456789abcdef".to_vec();
+    span.span_id = b"01234567".to_vec();
+    span.parent_span_id = b"76543210".to_vec();
+    span.name = "zero-duration-probe".to_owned();
+    span.end_time_unix_nano = span.start_time_unix_nano;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{http}/v1/traces"))
+        .header("content-type", "application/x-protobuf")
+        .body(request.encode_to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(
+        traces
+            .export(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .partial_success
+            .is_none()
+    );
+    let json_request = serde_json::json!({"resourceSpans":[{
+        "resource":{"attributes":[{"key":"service.name","value":{"stringValue":"public-image-probe"}}]},
+        "schemaUrl":"https://example.invalid/resource-schema",
+        "scopeSpans":[{"scope":{"name":"public-image-probe","version":"1.0.0"},"schemaUrl":"https://example.invalid/scope-schema",
+            "spans":[{"traceId":"30313233343536373839616263646566","spanId":"3031323334353637",
+                "parentSpanId":"3736353433323130","name":"zero-duration-probe","kind":1,
+                "startTimeUnixNano":"0","endTimeUnixNano":"0"}]}]}]});
+    let response = client
+        .post(format!("{http}/v1/traces"))
+        .header("content-type", "application/json")
+        .json(&json_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let mut events = Vec::new();
+    for _ in 0..40 {
+        events = output_events(&container);
+        if events.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(events.len(), 3);
+    for event in events {
+        let resource = &event["resourceSpans"][0];
+        assert_eq!(
+            resource["schemaUrl"],
+            "https://example.invalid/resource-schema"
+        );
+        let scope = &resource["scopeSpans"][0];
+        assert_eq!(scope["scope"]["name"], "public-image-probe");
+        assert_eq!(scope["scope"]["version"], "1.0.0");
+        assert_eq!(scope["schemaUrl"], "https://example.invalid/scope-schema");
+        let span = &scope["spans"][0];
+        assert_eq!(span["name"], "zero-duration-probe");
+        assert_eq!(span["traceId"], "0123456789abcdef");
+        assert_eq!(span["spanId"], "01234567");
+        assert_eq!(span["parentSpanId"], "76543210");
+    }
+    println!("SOURCE_BOUND_IMAGE_HTTP_JSON_GRPC_NOOP_AND_NONEMPTY_IDENTITY_PASS");
+}
