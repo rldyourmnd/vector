@@ -2569,7 +2569,11 @@ fn output_events(container: &str) -> Vec<serde_json::Value> {
         .unwrap()
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|value| value.get("resourceSpans").is_some())
+        .filter(|value| {
+            ["resourceSpans", "resourceLogs", "resourceMetrics"]
+                .into_iter()
+                .any(|field| value.get(field).is_some())
+        })
         .collect()
 }
 
@@ -2577,7 +2581,7 @@ fn create_image_probe_request() -> ExportTraceServiceRequest {
     let mut request = create_test_traces_request();
     let resource = &mut request.resource_spans[0];
     resource.schema_url = "https://example.invalid/resource-schema".to_owned();
-    resource.resource.as_mut().unwrap().attributes = vec![KeyValue {
+    resource.resource.get_or_insert_default().attributes = vec![KeyValue {
         key: "service.name".to_owned(),
         value: Some(AnyValue {
             value: Some(StringValue("public-image-probe".to_owned())),

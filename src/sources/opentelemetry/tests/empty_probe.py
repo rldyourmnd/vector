@@ -21,7 +21,11 @@ def probe(base):
             cases.append((signal, shape, json.dumps(payload).encode(), "application/json"))
     cases += [("traces", "repeat-default", b"", "application/x-protobuf"),
         ("traces", "malformed-protobuf", bytes.fromhex("80"), "application/x-protobuf"),
-        ("traces", "json-incomplete-body", b"", "application/json")]
+        ("traces", "json-incomplete-body", b"", "application/json"),
+        ("traces", "json-malformed", b"{", "application/json"),
+        ("traces", "json-named-enum", b'{"resourceSpans":[{"scopeSpans":[{"spans":[{"kind":"SPAN_KIND_INTERNAL"}]}]}]}', "application/json"),
+        ("traces", "json-unknown-field", b'{"futureEnvelope":{"kind":"IGNORED","traceId":"not-hex"}}', "application/json"),
+        ("traces", "json-proto-alias-is-unknown", b'{"resource_spans":[{"scopeSpans":[{"spans":[{}]}]}]}', "application/json")]
     for signal, shape, payload, content in cases:
         request = Request(base + "/v1/" + signal, data=payload,
             headers={"Content-Type": content}, method="POST")
@@ -62,7 +66,8 @@ def main():
         assert all(r["status"] == 400 for r in defaults), "baseline rejection was not reproduced"
         print("BASELINE_REPRODUCED: valid default protobuf exports rejected with400")
     else:
-        positives = [r for r in rows if r["shape"] not in ["malformed-protobuf", "json-incomplete-body"]]
+        negatives = {"malformed-protobuf", "json-incomplete-body", "json-malformed", "json-named-enum"}
+        positives = [r for r in rows if r["shape"] not in negatives]
         assert all(r["status"] == 200 for r in positives), "empty export support failed"
         for row in positives:
             if row["request_content_type"] == "application/x-protobuf":
@@ -70,7 +75,7 @@ def main():
             else:
                 assert row["response_content_type"].startswith("application/json")
                 assert json.loads(bytes.fromhex(row["response_hex"])) == {}
-        assert next(r for r in rows if r["shape"] == "json-incomplete-body")["status"] == 400
+        assert all(r["status"] == 400 for r in rows if r["shape"] in negatives)
         print("FIXED_EMPTY_CONTROLS_PASS: canonical zero-record responses, no persistence claim")
     assert next(r for r in rows if r["shape"] == "malformed-protobuf")["status"] == 400
 
