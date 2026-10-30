@@ -6,6 +6,8 @@ on:
     paths:
       - ci/otlp-empty-probe.py
       - .github/workflows/otlp-empty-qualification.yml
+      - src/sources/opentelemetry/**
+      - Cargo.toml
 
 permissions:
   contents: read
@@ -16,7 +18,7 @@ concurrency:
 
 jobs:
   baseline:
-    if: github.repository == 'rldyourmnd/vector'
+    if: github.repository == 'rldyourmnd/vector' && github.sha == '49d283a1fb1fe45fa7f8fe6c443cceb31b3d980d'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -53,3 +55,45 @@ jobs:
           address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$lane")
           python3 -B ci/otlp-empty-probe.py "http://$address:4318" --expect baseline
           docker image inspect "$VECTOR_BASE" --format '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}'
+
+  affected:
+    if: github.repository == 'rldyourmnd/vector'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind provider-owned native temporary output
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/otlp-native-target" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup
+        with:
+          rust: true
+          protoc: true
+          libsasl2: true
+          cargo-nextest: true
+          cargo-cache: false
+          vdev: true
+      - name: Record native source and derive exact component features
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD 'HEAD^{tree}'
+          sha256sum Cargo.lock rust-toolchain.toml
+          rustc --version --verbose
+          cargo --version
+          vdev --version
+          features=$(vdev features src/sources/opentelemetry/tests/empty-exports.yaml)
+          test -n "$features"
+          echo "FEATURES=$features" >> "$GITHUB_ENV"
+          printf 'Derived features: %s\n' "$features"
+      - name: Check affected Rust targets through native vdev
+        run: make check-clippy FEATURES="$FEATURES"
+      - name: Run native OTLP component regressions
+        run: make test FEATURES="$FEATURES" SCOPE=opentelemetry
