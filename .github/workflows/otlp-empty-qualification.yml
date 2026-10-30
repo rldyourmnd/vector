@@ -1,0 +1,55 @@
+name: OTLP empty export qualification
+
+on:
+  push:
+    branches: [qualification/otlp-empty]
+    paths:
+      - ci/otlp-empty-probe.py
+      - .github/workflows/otlp-empty-qualification.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: otlp-empty-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  baseline:
+    if: github.repository == 'rldyourmnd/vector'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VECTOR_BASE: timberio/vector:0.60.0-debian@sha256:73f0cd0e2c52f5d1f7bad12b1f3f2e9dbb375b469eec8c77fb5ae35c58a8a6d2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Reproduce selected image empty request rejection
+        shell: bash
+        run: |
+          set -euo pipefail
+          lane="otlp-empty-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker pull "$VECTOR_BASE"
+          docker network create --internal "$lane"
+          trap 'docker rm -f "$lane"; docker network rm "$lane"' EXIT
+          cat > "$RUNNER_TEMP/otlp-empty.yaml" <<'YAML'
+          data_dir: /data
+          sources:
+            otel:
+              type: opentelemetry
+              decoding:
+                codec: otlp
+              http:
+                address: 0.0.0.0:4318
+              grpc:
+                address: 0.0.0.0:4317
+          sinks:
+            discard:
+              type: blackhole
+              inputs: [otel.traces, otel.logs, otel.metrics]
+          YAML
+          docker run -d --name "$lane" --network "$lane"             --cpus 1 --memory 512m --pids-limit 128 --read-only --cap-drop ALL             --tmpfs /data:rw,size=16777216 --tmpfs /tmp:rw,size=16777216             --mount "type=bind,src=$RUNNER_TEMP/otlp-empty.yaml,dst=/etc/vector/fixture.yaml,readonly"             "$VECTOR_BASE" --config /etc/vector/fixture.yaml
+          address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$lane")
+          python3 -B ci/otlp-empty-probe.py "http://$address:4318" --expect baseline
+          docker image inspect "$VECTOR_BASE" --format '{{json .RepoDigests}} {{.Os}}/{{.Architecture}}'
