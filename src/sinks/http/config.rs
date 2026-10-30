@@ -441,6 +441,45 @@ impl ValidatedSink for HttpSinkConfig {
 }
 
 impl HttpSinkConfig {
+    fn build_http_service(
+        &self,
+        client: HttpClient,
+        request_builder: HttpSinkRequestBuilder,
+    ) -> BoxFuture<'_, crate::Result<HttpService<HttpSinkRequestBuilder, super::sink::PartitionKey>>>
+    {
+        // The factory remains future-shaped when optional AWS auth is not compiled.
+        #[cfg(feature = "aws-core")]
+        if let Some(Auth::Aws { auth, service }) = &self.auth {
+            return async move {
+                let default_region = crate::aws::region_provider(&ProxyConfig::default(), None)?
+                    .region()
+                    .await;
+                let region = (match auth {
+                    AwsAuthentication::AccessKey { region, .. }
+                    | AwsAuthentication::Role { region, .. }
+                    | AwsAuthentication::Default { region, .. } => region.clone(),
+                    AwsAuthentication::File { .. } => None,
+                })
+                .map_or(default_region, |r| Some(Region::new(r)))
+                .expect("Region must be specified");
+
+                Ok(HttpService::new_with_sig_v4(
+                    client,
+                    request_builder,
+                    SigV4Config {
+                        shared_credentials_provider: auth
+                            .credentials_provider(region.clone(), &ProxyConfig::default(), None)
+                            .await?,
+                        region: region.clone(),
+                        service: service.clone(),
+                    },
+                ))
+            }
+            .boxed();
+        }
+        future::ready(Ok(HttpService::new(client, request_builder))).boxed()
+    }
+
     /// Builds the sink from the validated state. Confinement of the URI and
     /// templated headers happens here (not in `validate`) because the
     /// `component_name` threaded from the `opentelemetry`/`axiom` delegations
@@ -493,35 +532,9 @@ impl HttpSinkConfig {
             content_encoding.clone(),
         );
 
-        let service = match &self.auth {
-            #[cfg(feature = "aws-core")]
-            Some(Auth::Aws { auth, service }) => {
-                let default_region = crate::aws::region_provider(&ProxyConfig::default(), None)?
-                    .region()
-                    .await;
-                let region = (match &auth {
-                    AwsAuthentication::AccessKey { region, .. }
-                    | AwsAuthentication::Role { region, .. }
-                    | AwsAuthentication::Default { region, .. } => region.clone(),
-                    AwsAuthentication::File { .. } => None,
-                })
-                .map_or(default_region, |r| Some(Region::new(r)))
-                .expect("Region must be specified");
-
-                HttpService::new_with_sig_v4(
-                    client,
-                    http_sink_request_builder,
-                    SigV4Config {
-                        shared_credentials_provider: auth
-                            .credentials_provider(region.clone(), &ProxyConfig::default(), None)
-                            .await?,
-                        region: region.clone(),
-                        service: service.clone(),
-                    },
-                )
-            }
-            _ => HttpService::new(client, http_sink_request_builder),
-        };
+        let service = self
+            .build_http_service(client, http_sink_request_builder)
+            .await?;
 
         let service = ServiceBuilder::new()
             .settings(
