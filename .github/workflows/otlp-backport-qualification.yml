@@ -21,7 +21,7 @@ jobs:
       contents: read
       packages: write
     env:
-      EXPECTED_SOURCE_REF: e6ced7c785705a5f43432759aaf5a181495f08ae
+      EXPECTED_SOURCE_REF: 91bf05b7b090604e3719f0b7b92c460d2a6d71b7
       UPSTREAM_BASE: 0d0b35865036f8b5c2f0104d9744fa84985ffff1
       VECTOR_BASE: timberio/vector:0.60.0-debian@sha256:73f0cd0e2c52f5d1f7bad12b1f3f2e9dbb375b469eec8c77fb5ae35c58a8a6d2
       CARGO_BUILD_JOBS: 2
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          ref: e6ced7c785705a5f43432759aaf5a181495f08ae
+          ref: 91bf05b7b090604e3719f0b7b92c460d2a6d71b7
       - name: Bind only provider-owned native outputs
         shell: bash
         run: |
