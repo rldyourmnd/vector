@@ -1,0 +1,182 @@
+name: OTLP0.60 source-bound native candidate
+
+on:
+  push:
+    branches: [qualification/otlp-empty]
+    paths: [.github/workflows/otlp-backport-qualification.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: otlp060-native-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.repository == 'rldyourmnd/vector'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      EXPECTED_SOURCE_REF: 5db7dfb25dc9d6b19e3c3e1697dde1a2561c81d6
+      UPSTREAM_BASE: 0d0b35865036f8b5c2f0104d9744fa84985ffff1
+      VECTOR_BASE: timberio/vector:0.60.0-debian@sha256:73f0cd0e2c52f5d1f7bad12b1f3f2e9dbb375b469eec8c77fb5ae35c58a8a6d2
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: 5db7dfb25dc9d6b19e3c3e1697dde1a2561c81d6
+      - name: Bind only provider-owned native outputs
+        shell: bash
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/otlp060-native-target" >> "$GITHUB_ENV"
+          echo "VECTOR_BUILD_DESC=otlp-empty-native-${EXPECTED_SOURCE_REF:0:12}" >> "$GITHUB_ENV"
+          git config --local core.abbrev 12
+      - uses: ./.github/actions/setup
+        with:
+          rust: true
+          protoc: true
+          libsasl2: true
+          cargo-nextest: true
+          cargo-cache: false
+          vdev: true
+      - name: Bind source base lock toolchain and native feature plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REF"
+          git fetch --no-tags origin "$UPSTREAM_BASE"
+          git diff --exit-code "$UPSTREAM_BASE" HEAD -- Cargo.lock
+          git rev-parse HEAD 'HEAD^{tree}'
+          sha256sum Cargo.lock rust-toolchain.toml
+          rustc --version --verbose
+          cargo --version
+          vdev --version
+          features=$(vdev features src/sources/opentelemetry/tests/empty-exports.yaml | paste -sd, -)
+          test -n "$features"
+          echo "FEATURES=$features" >> "$GITHUB_ENV"
+          epoch=$(git show -s --format=%ct HEAD)
+          echo "SOURCE_DATE_EPOCH=$epoch" >> "$GITHUB_ENV"
+          printf 'Native candidate features: %s\n' "$features"
+      - name: Check all affected Rust targets
+        run: make check-clippy FEATURES="$FEATURES"
+      - name: Exercise existing and new native source regressions
+        run: make test FEATURES="$FEATURES" SCOPE=opentelemetry
+      - name: Build the declared native dev candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin vector --no-default-features --features "$FEATURES" --message-format=json > "$RUNNER_TEMP/vector-first.jsonl"
+          sha256sum "$CARGO_TARGET_DIR/debug/vector" | cut -d' ' -f1 > "$RUNNER_TEMP/vector-first.sha256"
+          file "$CARGO_TARGET_DIR/debug/vector"
+          "$CARGO_TARGET_DIR/debug/vector" --version
+      - name: Verify same-environment native root recompilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch src/lib.rs src/main.rs
+          cargo build --locked --offline --bin vector --no-default-features --features "$FEATURES" --message-format=json > "$RUNNER_TEMP/vector-second.jsonl"
+          sha256sum "$CARGO_TARGET_DIR/debug/vector" | cut -d' ' -f1 > "$RUNNER_TEMP/vector-second.sha256"
+          cmp "$RUNNER_TEMP/vector-first.sha256" "$RUNNER_TEMP/vector-second.sha256"
+          python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          rows=[json.loads(x) for x in (Path(os.environ["RUNNER_TEMP"])/"vector-second.jsonl").read_text().splitlines()]
+          artifacts=[x for x in rows if x.get("reason")=="compiler-artifact"]
+          root=[x for x in artifacts if x.get("target",{}).get("name")=="vector" and "bin" in x["target"]["kind"]]
+          assert len(root)==1 and root[0]["fresh"] is False
+          print(json.dumps({"root_recompiled": True, "dependency_artifacts_fresh": sum(x["fresh"] for x in artifacts), "binary_hash_equal": True, "limit":"same environment, not an independent cold-host reproduction"}))
+          PYTHON
+      - name: Assemble exact-base OCI candidate and run real wire controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          context="$RUNNER_TEMP/vector-image"
+          mkdir "$context"
+          install -m 0755 "$CARGO_TARGET_DIR/debug/vector" "$context/vector"
+          touch -d "@$SOURCE_DATE_EPOCH" "$context/vector"
+          printf 'FROM %s\nCOPY --chmod=0755 vector /usr/bin/vector\n' "$VECTOR_BASE" > "$context/Dockerfile"
+          docker pull "$VECTOR_BASE"
+          image="ghcr.io/rldyourmnd/vector-otlp-empty:0.60.0-native-${EXPECTED_SOURCE_REF:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "CANDIDATE_IMAGE=$image" >> "$GITHUB_ENV"
+          docker build --pull=false --provenance=false --build-arg "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"             --label org.opencontainers.image.source=https://github.com/rldyourmnd/vector             --label "org.opencontainers.image.revision=$EXPECTED_SOURCE_REF"             --label org.opencontainers.image.version=0.60.0-otlp-empty-native             --label "io.vector.native.binary-sha256=$(cat "$RUNNER_TEMP/vector-first.sha256")"             --label "io.vector.native.features=$FEATURES" --tag "$image" "$context"
+          docker run --rm --read-only --cap-drop ALL "$image" --version
+          lane="otlp060-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker network create --internal "$lane"
+          trap 'docker rm -f "$lane"; docker network rm "$lane"' EXIT
+          cat > "$RUNNER_TEMP/otlp060-image.yaml" <<'YAML'
+          data_dir: /data
+          sources:
+            otel:
+              type: opentelemetry
+              decoding:
+                codec: otlp
+              http:
+                address: 0.0.0.0:4318
+              grpc:
+                address: 0.0.0.0:4317
+          sinks:
+            output:
+              type: console
+              inputs: [otel.traces, otel.logs, otel.metrics]
+              encoding:
+                codec: json
+          YAML
+          docker run -d --name "$lane" --network "$lane" --cpus 1 --memory 512m --pids-limit 128             --read-only --cap-drop ALL --tmpfs /data:rw,size=16777216 --tmpfs /tmp:rw,size=16777216             --mount "type=bind,src=$RUNNER_TEMP/otlp060-image.yaml,dst=/etc/vector/fixture.yaml,readonly"             "$image" --config /etc/vector/fixture.yaml
+          address=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$lane")
+          python3 -B src/sources/opentelemetry/tests/empty_probe.py "http://$address:4318" --expect fixed
+          VECTOR_TEST_OTLP_HTTP="http://$address:4318" VECTOR_TEST_OTLP_GRPC="http://$address:4317" VECTOR_TEST_OTLP_CONTAINER="$lane"             cargo test --locked --offline -p vector --lib --no-default-features --features "$FEATURES"             sources::opentelemetry::tests::qualified_image_empty_exports -- --ignored --exact --nocapture
+          docker logs "$lane"
+          docker image inspect "$image" --format '{{json .RepoDigests}} {{.Id}} {{.Os}}/{{.Architecture}}'
+      - name: Verify canonical inputs before publishing
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_REF"
+          git diff --exit-code -- Cargo.toml Cargo.lock rust-toolchain.toml src/sources/opentelemetry
+          sha256sum Cargo.lock rust-toolchain.toml "$CARGO_TARGET_DIR/debug/vector"
+      - name: Publish only the qualified public-source OCI candidate
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$CANDIDATE_IMAGE"
+          docker image inspect "$CANDIDATE_IMAGE" --format '{{json .RepoDigests}}'
+          docker buildx imagetools inspect "$CANDIDATE_IMAGE" --raw > "$RUNNER_TEMP/vector-manifest.json"
+          python3 - <<'PYTHON'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          temp=Path(os.environ["RUNNER_TEMP"])
+          manifest=(temp/"vector-manifest.json").read_bytes()
+          parsed=json.loads(manifest)
+          assert "manifests" not in parsed, "expected one platform manifest, not an unbound index"
+          image=json.loads(subprocess.check_output(["docker","image","inspect",os.environ["CANDIDATE_IMAGE"]]))[0]
+          refs=[x for x in image["RepoDigests"] if x.startswith("ghcr.io/rldyourmnd/vector-otlp-empty@")]
+          assert len(refs)==1 and image["Os"]=="linux" and image["Architecture"]=="amd64"
+          registry_digest=refs[0].split("@",1)[1]
+          if "sha256:"+hashlib.sha256(manifest).hexdigest()!=registry_digest:
+              manifest=manifest.rstrip(b"\n")
+          assert "sha256:"+hashlib.sha256(manifest).hexdigest()==registry_digest, "raw manifest must match pushed digest"
+          assert parsed["config"]["digest"]==image["Id"]
+          base=os.environ["UPSTREAM_BASE"]
+          patch=subprocess.check_output(["git","diff","--binary",base,"HEAD"])
+          binary=Path(os.environ["CARGO_TARGET_DIR"])/"debug/vector"
+          receipt={"schema":1,"source_repository":"https://github.com/rldyourmnd/vector","source_ref":os.environ["EXPECTED_SOURCE_REF"],"upstream_base":base,
+            "patch_sha256":hashlib.sha256(patch).hexdigest(),"lock_sha256":hashlib.sha256(Path("Cargo.lock").read_bytes()).hexdigest(),
+            "rust_toolchain_sha256":hashlib.sha256(Path("rust-toolchain.toml").read_bytes()).hexdigest(),"binary_sha256":hashlib.sha256(binary.read_bytes()).hexdigest(),
+            "runtime_base":os.environ["VECTOR_BASE"],"candidate_image":os.environ["CANDIDATE_IMAGE"],"platform_manifest_sha256":hashlib.sha256(manifest).hexdigest(),"platform_manifest_digest":registry_digest,"immutable_locator":refs[0],
+            "platform":"linux/amd64","features":os.environ["FEATURES"],"profile":{"name":"dev","opt_level":0,"debug_info":0,"incremental":False},
+            "compiler":subprocess.check_output(["rustc","--version","--verbose"],text=True),"cargo":subprocess.check_output(["cargo","--version"],text=True).strip(),
+            "runner_image_os":os.environ.get("ImageOS"),"runner_image_version":os.environ.get("ImageVersion"),"source_date_epoch":os.environ["SOURCE_DATE_EPOCH"],
+            "native_source_clippy_tests":"passed","actual_image_http_json_grpc_noop_and_nonempty_identity":"passed","same_environment_root_recompile":"binary hash equal",
+            "limits":["functional native candidate, not production performance/rollout acceptance","same environment reproducibility only","no private consumer/backend or central-cache acceptance"]}
+          print("SOURCE_BOUND_OCI_CANDIDATE_RECEIPT="+json.dumps(receipt,sort_keys=True))
+          PYTHON
