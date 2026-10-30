@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 
 use base64::Engine as _;
 use bytes::Bytes;
-use prost::Message as _;
+use prost_reflect::prost::Message as _;
 use prost_reflect::{DescriptorPool, DeserializeOptions, DynamicMessage, Kind, MessageDescriptor};
 use serde_json::Value;
 use vector_lib::opentelemetry::proto::{
@@ -95,6 +95,7 @@ pub(super) fn request(signal: &str, body: &[u8]) -> Result<Bytes, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message as _;
     use vector_lib::opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest;
 
     #[test]
