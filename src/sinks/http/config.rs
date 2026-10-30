@@ -444,9 +444,16 @@ impl HttpSinkConfig {
     fn build_http_service(
         &self,
         client: HttpClient,
-        request_builder: HttpSinkRequestBuilder,
+        validated: &ValidatedHttp,
     ) -> BoxFuture<'_, crate::Result<HttpService<HttpSinkRequestBuilder, super::sink::PartitionKey>>>
     {
+        let request_builder = HttpSinkRequestBuilder::new(
+            self.method,
+            self.auth.clone(),
+            validated.converted_static_headers.clone(),
+            validated.content_type.clone(),
+            validated.content_encoding.clone(),
+        );
         // The factory remains future-shaped when optional AWS auth is not compiled.
         #[cfg(feature = "aws-core")]
         if let Some(Auth::Aws { auth, service }) = &self.auth {
@@ -496,10 +503,8 @@ impl HttpSinkConfig {
             template_headers,
             payload_prefix,
             payload_suffix,
-            content_type,
-            content_encoding,
-            converted_static_headers,
             request_limits,
+            ..
         } = validated;
 
         let client = self.build_http_client(&cx)?;
@@ -524,17 +529,7 @@ impl HttpSinkConfig {
             compression: self.compression,
         };
 
-        let http_sink_request_builder = HttpSinkRequestBuilder::new(
-            self.method,
-            self.auth.clone(),
-            converted_static_headers.clone(),
-            content_type.clone(),
-            content_encoding.clone(),
-        );
-
-        let service = self
-            .build_http_service(client, http_sink_request_builder)
-            .await?;
+        let service = self.build_http_service(client, validated).await?;
 
         let service = ServiceBuilder::new()
             .settings(
